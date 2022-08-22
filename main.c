@@ -7,6 +7,13 @@
 #include <errno.h>
 #include <math.h>
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <stdio.h>
+
+#pragma comment(lib, "Ws2_32.lib")
+
 #define GLFW_INCLUDE_GLEXT
 #include <GLFW/glfw3.h>
 
@@ -32,6 +39,22 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+
+float zoom_level = 1.0f;
+double xpos, ypos;
+V2d offset = {0.0, 0.0};
+
+#define MAX_POINTS 1024 * 10
+
+GLfloat points[MAX_POINTS][2] = {0};
+int points_count;
+void add_point(GLfloat x, GLfloat y) {
+    assert(points_count < MAX_POINTS);
+    printf("Adding point %f, %f\n", x, y);
+    points[points_count][0] = x;
+    points[points_count][1] = y;
+    ++points_count;
+}
 
 char *slurp_file_into_malloced_cstr(const char *file_path)
 {
@@ -150,20 +173,23 @@ typedef enum {
     TIME_UNIFORM,
     MOUSE_UNIFORM,
     TEX_UNIFORM,
+    ZOOM,
+    OFFSET,
     COUNT_UNIFORMS
 } Uniform;
 
-static_assert(COUNT_UNIFORMS == 4, "Update list of uniform names");
+static_assert(COUNT_UNIFORMS == 6, "Update list of uniform names");
 static const char *uniform_names[COUNT_UNIFORMS] = {
     [RESOLUTION_UNIFORM] = "resolution",
     [TIME_UNIFORM] = "time",
     [MOUSE_UNIFORM] = "mouse",
     [TEX_UNIFORM] = "tex",
+    [ZOOM] = "zoom",
+    [OFFSET] = "offset",
 };
 
 typedef enum {
-    PROGRAM_SCENE = 0,
-    PROGRAM_POST0,
+    PROGRAM_POST0 = 0,
     PROGRAM_POST1,
     COUNT_PROGRAMS
 } Program;
@@ -172,6 +198,7 @@ typedef enum {
     VA_POS = 0,
     VA_UV,
     VA_COLOR,
+    VA_LINES,
     COUNT_VAS,
 } Vertex_Attrib;
 
@@ -193,7 +220,7 @@ typedef struct {
 } Renderer;
 
 // Global variables (fragile people with CS degree look away)
-static double time = 0.0;
+static double ttime = 0.0;
 static bool pause = false;
 static GLuint user_texture = 0;
 static Renderer global_renderer = {0};
@@ -241,13 +268,17 @@ void r_sync_uniforms(Renderer *r,
                      GLfloat resolution_width, GLfloat resolution_height,
                      GLfloat time,
                      GLfloat mouse_x, GLfloat mouse_y,
-                     GLint tex_unit)
+                     GLint tex_unit,
+                     GLfloat zoom_level,
+                     V2d offset)
 {
-    static_assert(COUNT_UNIFORMS == 4, "Exhaustive uniform handling in ");
+    static_assert(COUNT_UNIFORMS == 6, "Exhaustive uniform handling in ");
     glUniform2f(r->uniforms[program][RESOLUTION_UNIFORM], resolution_width, resolution_height);
     glUniform1f(r->uniforms[program][TIME_UNIFORM], time);
     glUniform2f(r->uniforms[program][MOUSE_UNIFORM], mouse_x, mouse_y);
     glUniform1i(r->uniforms[program][TEX_UNIFORM], tex_unit);
+    glUniform1f(r->uniforms[program][ZOOM], zoom_level);
+    glUniform2f(r->uniforms[program][OFFSET], offset.x, offset.y);
 }
 
 bool load_shader_program(const char *vertex_file_path,
@@ -353,12 +384,8 @@ void reload_render_conf(const char *render_conf_path)
             // There is always something after `value`. It's either `\n` or `\0`. With all of these
             // invariats in place writing to `value.data[value.count]` should be safe.
 
-            static_assert(COUNT_PROGRAMS == 3, "Exhaustive handling of shader programs in config parsing");
-            if (sv_eq(key, SV("vert[SCENE]"))) {
-                vert_path[PROGRAM_SCENE] = value.data;
-            } else if (sv_eq(key, SV("frag[SCENE]"))) {
-                frag_path[PROGRAM_SCENE] = value.data;
-            } else if (sv_eq(key, SV("vert[POST0]"))) {
+            static_assert(COUNT_PROGRAMS == 2, "Exhaustive handling of shader programs in config parsing");
+            if (sv_eq(key, SV("vert[POST0]"))) {
                 vert_path[PROGRAM_POST0] = value.data;
             } else if (sv_eq(key, SV("frag[POST0]"))) {
                 frag_path[PROGRAM_POST0] = value.data;
@@ -395,42 +422,6 @@ void reload_render_conf(const char *render_conf_path)
     }
 }
 
-bool reload_user_textures(void)
-{
-    int texture_width, texture_height;
-    unsigned char *texture_pixels = stbi_load(texture_path, &texture_width, &texture_height, NULL, 4);
-    if (texture_pixels == NULL) {
-        fprintf(stderr, "ERROR: could not load image %s: %s\n",
-                texture_path, strerror(errno));
-        return false;
-    }
-
-    glDeleteTextures(1, &user_texture);
-    glGenTextures(1, &user_texture);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, user_texture);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-
-    glTexImage2D(GL_TEXTURE_2D,
-                 0,
-                 GL_RGBA,
-                 texture_width,
-                 texture_height,
-                 0,
-                 GL_RGBA,
-                 GL_UNSIGNED_BYTE,
-                 texture_pixels);
-
-    stbi_image_free(texture_pixels);
-
-    printf("Successfully reloaded textures\n");
-    return true;
-}
-
 bool r_reload_shaders(Renderer *r)
 {
     for (Program p = 0; p < COUNT_PROGRAMS; ++p) {
@@ -460,6 +451,8 @@ bool r_reload(Renderer *r)
 
 static GLuint scene_framebuffer = {0};
 static GLuint scene_texture = 0;
+static GLuint line_buffer = 0;
+static GLuint line_buffer_vao = 0;
 
 void scene_framebuffer_init(void)
 {
@@ -498,7 +491,24 @@ void scene_framebuffer_init(void)
 
     printf("Successfully created the debug framebuffer\n");
 }
-
+static V2d press_location;
+static bool press_down = false;
+static V2d old_offset;
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
+{
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        press_down = true;
+        glfwGetCursorPos(window, &press_location.x, &press_location.y);
+        old_offset = v2d(offset.x, offset.y);
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_RELEASE) {
+        press_down = false;
+        old_offset = v2d(offset.x, offset.y);
+    }
+}
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    zoom_level *= (1.0f + (float)yoffset*0.05f);
+}
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
     (void) scancode;
@@ -508,7 +518,6 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_F5) {
             reload_render_conf("render.conf");
-            reload_user_textures();
             r_reload(&global_renderer);
         } else if (key == GLFW_KEY_F6) {
 #define SCREENSHOT_PNG_PATH "screenshot.png"
@@ -530,13 +539,14 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
             pause = !pause;
         } else if (key == GLFW_KEY_Q) {
             exit(1);
+        } else if (key == GLFW_KEY_R) {
+            zoom_level = 1.0f;
         }
-
         if (pause) {
             if (key == GLFW_KEY_LEFT) {
-                time -= MANUAL_TIME_STEP;
+                ttime -= MANUAL_TIME_STEP;
             } else if (key == GLFW_KEY_RIGHT) {
-                time += MANUAL_TIME_STEP;
+                ttime += MANUAL_TIME_STEP;
             }
         }
     }
@@ -581,8 +591,8 @@ void r_init(Renderer *r)
 {
     glGenVertexArrays(1, &r->vao);
     glBindVertexArray(r->vao);
-
     glGenBuffers(1, &r->vbo);
+
     glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(r->vertex_buf), r->vertex_buf, GL_DYNAMIC_DRAW);
 
@@ -609,16 +619,36 @@ void r_init(Renderer *r)
                           GL_FALSE,
                           sizeof(Vertex),
                           (void*) offsetof(Vertex, color));
+    glGenVertexArrays(1, &line_buffer_vao);
+    glBindVertexArray(line_buffer_vao);
+    glGenBuffers(1, &line_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, line_buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(points), points, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(VA_LINES);
+    glVertexAttribPointer(VA_LINES,
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(GLfloat) * 2,
+                          (void*) 0);
+}
+void r_sync_lines_buffer() {
+    glBindVertexArray(line_buffer_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, line_buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(points), points, GL_DYNAMIC_DRAW);
 }
 
 void r_clear(Renderer *r)
 {
     r->vertex_buf_sz = 0;
 }
-
-int main(void)
-{
-    reload_render_conf("render.conf");
+V2d get_uv(V2d frag, V2d res) {
+    return v2d_div(
+        v2d_sub(frag, v2d_mul(v2d(.5, .5), res)),
+        v2d(res.y, res.y));
+}
+int gl_main(void) {
+reload_render_conf("render.conf");
 
     if (!glfwInit()) {
         fprintf(stderr, "ERROR: could not initialize GLFW\n");
@@ -632,7 +662,7 @@ int main(void)
     GLFWwindow * const window = glfwCreateWindow(
                                     DEFAULT_SCREEN_WIDTH,
                                     DEFAULT_SCREEN_HEIGHT,
-                                    "OpenGL Template",
+                                    "T C Plotter",
                                     NULL,
                                     NULL);
     if (window == NULL) {
@@ -665,58 +695,58 @@ int main(void)
     scene_framebuffer_init();
 
     Renderer *r = &global_renderer;
-
-    reload_user_textures();
-
+    
     r_init(r);
     r_reload(r);
-
+    
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetScrollCallback(window, scroll_callback);
     glfwSetKeyCallback(window, key_callback);
     glfwSetFramebufferSizeCallback(window, window_size_callback);
 
-    time = glfwGetTime();
+    ttime = glfwGetTime();
     double prev_time = 0.0;
     double delta_time = 0.0f;
+    zoom_level = 1.0f;
+    glLineWidth(4.0f);
+    int old_point_count = points_count;
+    add_point(0.0, 0.0);
+    add_point(0.0, 1.0),
+    add_point(1.0, 1.0),
+    add_point(1.0, 2.0),
+    add_point(2.0, 2.0),
+    add_point(0.0, 2.0);
+    
     while (!glfwWindowShouldClose(window)) {
         int width, height;
         glfwGetWindowSize(window, &width, &height);
-        double xpos, ypos;
         glfwGetCursorPos(window, &xpos, &ypos);
+        
         xpos = xpos - width * 0.5f;
         ypos = (height - ypos) - height * 0.5f;
-
+        if (old_point_count != points_count) {
+            r_sync_lines_buffer();
+            old_point_count = points_count;
+        }
         if (!r->reload_failed) {
-            static_assert(COUNT_PROGRAMS == 3, "Exhaustive handling of shader programs in the event loop");
-
-            glBindFramebuffer(GL_FRAMEBUFFER, scene_framebuffer);
-            {
-                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                glUseProgram(r->programs[PROGRAM_SCENE]);
-                r_clear(r);
-                r_sync_uniforms(r, PROGRAM_SCENE, width, height, time, xpos, ypos, 0);
-                for (size_t i = objects_count; i > 0; --i) {
-                    object_render(r, &objects[i - 1]);
-                }
-                r_sync_buffers(r);
-
-                glDrawArraysInstanced(GL_TRIANGLES, 0, (GLsizei) r->vertex_buf_sz, 1);
-            }
-
+            static_assert(COUNT_PROGRAMS == 2, "Exhaustive handling of shader programs in the event loop");
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             {
                 glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
 
-#if 0
                 glUseProgram(r->programs[PROGRAM_POST0]);
-                r_sync_uniforms(r, PROGRAM_POST0, width, height, time, xpos, ypos, 1);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-#endif
-
+                r_sync_uniforms(r, PROGRAM_POST0, width, height, ttime, xpos, ypos, 1, zoom_level, offset);
+                {
+                    glBindVertexArray(line_buffer_vao);
+                    glBindBuffer(GL_ARRAY_BUFFER, line_buffer);
+                    glDrawArraysInstanced(GL_LINE_STRIP, 0, points_count, 1);
+                }
+                glBindVertexArray(r->vao);
+                glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
                 glUseProgram(r->programs[PROGRAM_POST1]);
                 r_clear(r);
-                r_sync_uniforms(r, PROGRAM_POST1, width, height, time, xpos, ypos, 1);
+                r_sync_uniforms(r, PROGRAM_POST1, width, height, ttime, xpos, ypos, 1, zoom_level, offset);
                 r_quad_cr(r, v2ff(0.0f), v2f(width * 0.5, height * 0.5), COLOR_BLACK_V4F);
                 r_sync_buffers(r);
                 glDrawArraysInstanced(GL_TRIANGLES, 0, (GLsizei) r->vertex_buf_sz, 1);
@@ -727,8 +757,8 @@ int main(void)
         }
 
         if (objects_count > 0) {
-            float follow_x = xpos + sin(time * rotate_speed) * rotate_radius;
-            float follow_y = ypos + cos(time * rotate_speed) * rotate_radius;
+            float follow_x = xpos + sin(ttime * rotate_speed) * rotate_radius;
+            float follow_y = ypos + cos(ttime * rotate_speed) * rotate_radius;
 
             object_update(&objects[0], delta_time, follow_x, follow_y);
             for (size_t i = 1; i < objects_count; ++i) {
@@ -736,15 +766,135 @@ int main(void)
             }
         }
 
+        
         glfwSwapBuffers(window);
         glfwPollEvents();
         double cur_time = glfwGetTime();
         delta_time = cur_time - prev_time;
         if (!pause) {
-            time += delta_time;
+            ttime += delta_time;
         }
         prev_time = cur_time;
+        if (press_down) {
+            double mx, my;
+            glfwGetCursorPos(window, &mx, &my);
+            V2d res = v2d(width, height);
+            V2d uv = get_uv(v2d(mx, my), res);
+            V2d dist_without_zoom = v2d_sum(
+                    old_offset,
+                    v2d_mul(v2d(-zoom_level, zoom_level), v2d_sub(
+                        uv,
+                        get_uv(press_location, res))));
+            offset = dist_without_zoom;
+        }
     }
 
     return 0;
+}
+
+int iResult;
+
+void start_listening_tcp(void(*callback)(char *, int)) {
+    int clilen;
+    struct sockaddr_in serv_addr, cli_addr;
+    int n;
+    char buffer[256];
+    struct addrinfo *result = NULL, *ptr = NULL, hints;
+    ZeroMemory(&hints, sizeof (hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    // Resolve the local address and port to be used by the server
+    iResult = getaddrinfo(NULL, "42069", &hints, &result);
+    if (iResult != 0) {
+        printf("getaddrinfo failed: %d\n", iResult);
+        WSACleanup();
+        return;
+    }
+    SOCKET ListenSocket = INVALID_SOCKET;
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        printf("Error at socket(): %ld\n", WSAGetLastError());
+        freeaddrinfo(result);
+        WSACleanup();
+        return;
+    }
+    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        printf("bind failed with error: %d\n", WSAGetLastError());
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return;
+    }
+    if ( listen( ListenSocket, SOMAXCONN ) == SOCKET_ERROR ) {
+        printf( "Listen failed with error: %ld\n", WSAGetLastError() );
+        closesocket(ListenSocket);
+        WSACleanup();
+        return;
+    }
+    SOCKET ClientSocket;
+    accept: ClientSocket = INVALID_SOCKET;
+    // Accept a client socket
+    ClientSocket = accept(ListenSocket, NULL, NULL);
+    printf("Client connected\n");
+    if (ClientSocket == INVALID_SOCKET) {
+        printf("accept failed: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return;
+    }
+    char recvbuf[512];
+    int iResult, iSendResult;
+    int recvbuflen = 512;
+
+    // Receive until the peer shuts down the connection
+    do {
+        memset(recvbuf, 0, recvbuflen);
+        iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+        double d = atof(recvbuf);
+        if (iResult > 0) {
+            printf("Bytes received: %d\n", iResult);
+            callback(recvbuf, iResult);
+            // Echo the buffer back to the sender
+            iSendResult = send(ClientSocket, recvbuf, iResult, 0);
+            if (iSendResult == SOCKET_ERROR) {
+                printf("send failed: %d\n", WSAGetLastError());
+                closesocket(ClientSocket);
+                goto accept;
+            }
+            printf("Bytes sent: %d\n", iSendResult);
+        } else if (iResult == 0)
+            printf("Connection closing...\n");
+        else {
+            printf("recv failed: %d\n", WSAGetLastError());
+            closesocket(ClientSocket);
+            goto accept;
+        }
+    } while (iResult > 0);
+}
+
+void add_point_callback(char* buff, int len) {
+    GLfloat d = atof(buff); 
+    add_point(points_count, d);
+}
+int tcp_main(void) {
+    WSADATA wsaData;
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed: %d\n", iResult);
+        return 1;
+    }
+    while(1) {
+        start_listening_tcp(add_point_callback);
+    }
+    return 0;
+}
+
+int main(void)
+{
+     (HANDLE)_beginthread(tcp_main, 0, (void*)(uintptr_t)NULL);
+    return gl_main();
 }
