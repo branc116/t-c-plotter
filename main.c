@@ -40,6 +40,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+
+#define UNUSED(x) (void)((x))
+
 float zoom_level = 1.0f;
 double xpos, ypos;
 V2d offset = {0.0, 0.0};
@@ -269,16 +272,16 @@ void r_sync_uniforms(Renderer *r,
                      GLfloat time,
                      GLfloat mouse_x, GLfloat mouse_y,
                      GLint tex_unit,
-                     GLfloat zoom_level,
-                     V2d offset)
+                     GLfloat zoom_level_p,
+                     V2d offset_p)
 {
     static_assert(COUNT_UNIFORMS == 6, "Exhaustive uniform handling in ");
     glUniform2f(r->uniforms[program][RESOLUTION_UNIFORM], resolution_width, resolution_height);
     glUniform1f(r->uniforms[program][TIME_UNIFORM], time);
     glUniform2f(r->uniforms[program][MOUSE_UNIFORM], mouse_x, mouse_y);
     glUniform1i(r->uniforms[program][TEX_UNIFORM], tex_unit);
-    glUniform1f(r->uniforms[program][ZOOM], zoom_level);
-    glUniform2f(r->uniforms[program][OFFSET], offset.x, offset.y);
+    glUniform1f(r->uniforms[program][ZOOM], zoom_level_p);
+    glUniform2f(r->uniforms[program][OFFSET], (GLfloat)offset_p.x, (GLfloat)offset_p.y);
 }
 
 bool load_shader_program(const char *vertex_file_path,
@@ -406,12 +409,12 @@ void reload_render_conf(const char *render_conf_path)
             } else if (sv_eq(key, SV("objects_count"))) {
                 objects_count = strtol(value.data, NULL, 10);
                 if (objects_count > OBJECTS_CAP) {
-                    printf("%s:%d:%ld: WARNING: objects_count overflow\n",
+                    printf("%s:%d:%lld: WARNING: objects_count overflow\n",
                            render_conf_path, row, key.data - line_start);
                     objects_count = OBJECTS_CAP;
                 }
             } else {
-                printf("%s:%d:%ld: ERROR: unsupported key `"SV_Fmt"`\n",
+                printf("%s:%d:%lld: ERROR: unsupported key `"SV_Fmt"`\n",
                        render_conf_path, row, key.data - line_start,
                        SV_Arg(key));
                 continue;
@@ -496,6 +499,8 @@ static bool press_down = false;
 static V2d old_offset;
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 {
+    UNUSED(mods);
+
     if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
         press_down = true;
         glfwGetCursorPos(window, &press_location.x, &press_location.y);
@@ -507,13 +512,16 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 }
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
+    UNUSED(window);
+    UNUSED(xoffset);
+
     zoom_level *= (1.0f + (float)yoffset*0.05f);
 }
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
-    (void) scancode;
-    (void) action;
-    (void) mods;
+    UNUSED(scancode);
+    UNUSED(action);
+    UNUSED(mods);
 
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_F5) {
@@ -554,7 +562,7 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
 void window_size_callback(GLFWwindow* window, int width, int height)
 {
-    (void) window;
+    UNUSED(window);
     glViewport(0, 0, width, height);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, scene_texture);
@@ -578,10 +586,10 @@ void MessageCallback(GLenum source,
                      const GLchar* message,
                      const void* userParam)
 {
-    (void) source;
-    (void) id;
-    (void) length;
-    (void) userParam;
+    UNUSED(source);
+    UNUSED(id);
+    UNUSED(length);
+    UNUSED(userParam);
     fprintf(stderr, "GL CALLBACK: %s type = 0x%x, severity = 0x%x, message = %s\n",
             (type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : ""),
             type, severity, message);
@@ -736,7 +744,7 @@ reload_render_conf("render.conf");
                 glClear(GL_COLOR_BUFFER_BIT);
 
                 glUseProgram(r->programs[PROGRAM_POST0]);
-                r_sync_uniforms(r, PROGRAM_POST0, width, height, ttime, xpos, ypos, 1, zoom_level, offset);
+                r_sync_uniforms(r, PROGRAM_POST0, (GLfloat)width, (GLfloat)height, (GLfloat)ttime, (GLfloat)xpos, (GLfloat)ypos, 1, zoom_level, offset);
                 {
                     glBindVertexArray(line_buffer_vao);
                     glBindBuffer(GL_ARRAY_BUFFER, line_buffer);
@@ -746,8 +754,8 @@ reload_render_conf("render.conf");
                 glBindBuffer(GL_ARRAY_BUFFER, r->vbo);
                 glUseProgram(r->programs[PROGRAM_POST1]);
                 r_clear(r);
-                r_sync_uniforms(r, PROGRAM_POST1, width, height, ttime, xpos, ypos, 1, zoom_level, offset);
-                r_quad_cr(r, v2ff(0.0f), v2f(width * 0.5, height * 0.5), COLOR_BLACK_V4F);
+                r_sync_uniforms(r, PROGRAM_POST1, (GLfloat)width, (GLfloat)height, (GLfloat)ttime, (GLfloat)xpos, (GLfloat)ypos, 1, zoom_level, offset);
+                r_quad_cr(r, v2ff(0.0f), v2f(width * 0.5f, height * 0.5f), COLOR_BLACK_V4F);
                 r_sync_buffers(r);
                 glDrawArraysInstanced(GL_TRIANGLES, 0, (GLsizei) r->vertex_buf_sz, 1);
             }
@@ -757,12 +765,12 @@ reload_render_conf("render.conf");
         }
 
         if (objects_count > 0) {
-            float follow_x = xpos + sin(ttime * rotate_speed) * rotate_radius;
-            float follow_y = ypos + cos(ttime * rotate_speed) * rotate_radius;
+            float follow_x = (float)(xpos + sin(ttime * rotate_speed) * rotate_radius);
+            float follow_y = (float)(ypos + cos(ttime * rotate_speed) * rotate_radius);
 
-            object_update(&objects[0], delta_time, follow_x, follow_y);
+            object_update(&objects[0], (float)delta_time, follow_x, follow_y);
             for (size_t i = 1; i < objects_count; ++i) {
-                object_update(&objects[i], delta_time, objects[i - 1].x, objects[i - 1].y);
+                object_update(&objects[i], (float)delta_time, objects[i - 1].x, objects[i - 1].y);
             }
         }
 
@@ -795,11 +803,7 @@ reload_render_conf("render.conf");
 int iResult;
 
 void start_listening_tcp(void(*callback)(char *, int)) {
-    int clilen;
-    struct sockaddr_in serv_addr, cli_addr;
-    int n;
-    char buffer[256];
-    struct addrinfo *result = NULL, *ptr = NULL, hints;
+    struct addrinfo *result = NULL, hints;
     ZeroMemory(&hints, sizeof (hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -847,16 +851,14 @@ void start_listening_tcp(void(*callback)(char *, int)) {
         return;
     }
     char recvbuf[512];
-    int iResult, iSendResult;
+    int iSendResult;
     int recvbuflen = 512;
 
     // Receive until the peer shuts down the connection
     do {
         memset(recvbuf, 0, recvbuflen);
         iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-        double d = atof(recvbuf);
         if (iResult > 0) {
-            printf("Bytes received: %d\n", iResult);
             callback(recvbuf, iResult);
             // Echo the buffer back to the sender
             iSendResult = send(ClientSocket, recvbuf, iResult, 0);
@@ -865,7 +867,6 @@ void start_listening_tcp(void(*callback)(char *, int)) {
                 closesocket(ClientSocket);
                 goto accept;
             }
-            printf("Bytes sent: %d\n", iSendResult);
         } else if (iResult == 0)
             printf("Connection closing...\n");
         else {
@@ -877,10 +878,14 @@ void start_listening_tcp(void(*callback)(char *, int)) {
 }
 
 void add_point_callback(char* buff, int len) {
-    GLfloat d = atof(buff); 
-    add_point(points_count, d);
+    UNUSED(len);
+
+    GLfloat d = (GLfloat)atof(buff); 
+    add_point((GLfloat)points_count, (GLfloat)d);
 }
-int tcp_main(void) {
+int tcp_main(void * argz) {
+    UNUSED(argz);
+
     WSADATA wsaData;
     iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
     if (iResult != 0) {
@@ -892,9 +897,9 @@ int tcp_main(void) {
     }
     return 0;
 }
-
+HANDLE _beginthread(void(*func)(void *), int args, void *arg);
 int main(void)
 {
-     (HANDLE)_beginthread(tcp_main, 0, (void*)(uintptr_t)NULL);
+    (HANDLE)_beginthread(tcp_main, 0, (void*)(uintptr_t)NULL);
     return gl_main();
 }
