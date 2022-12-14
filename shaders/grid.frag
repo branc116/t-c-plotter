@@ -33,21 +33,16 @@ float map(vec2 fragCoord, float zoom_level, vec2 offset) {
 void main(void) {
     vec2 fragCoord = gl_FragCoord.xy;
     float buff = 0.0;
-    float AAx = 4.0, AAy = 4.0, AAz = 0.0;
+    float AAx = 1.0, AAy = 1.0, AAz = 0.0;
     for (float x = -AAx; x <= AAx; ++x)
     for (float y = -AAy; y <= AAy; ++y)
     for (float t = -AAz; t <= AAz; ++t)
         buff += map(
-            vec2(fragCoord) + vec2(x, y)/(vec2(AAx, AAy + 1.0)),
+            vec2(fragCoord) + vec2(AAx, y) / (vec2(AAx, AAy + 1.0)),
             zoom,
             offset
         );
-    
-    //float cLength = length(cPos);
-
-    //vec2 tex_uv = uv + (cPos/cLength)*mix(cos(cLength*12.0-time*4.0)*1.03, 0.0, cLength / 0.25);
     float aaCount = (AAx*2.0 + 1.0) * (AAy * 2.0 + 1.0) * (AAz * 2.0 + 1.0);
     buff /= aaCount;
     out_color = vec4(buff, buff, buff, 1.0f) / 2.0 + texture(tex, uv);
-    //out_color = vec4(sin(zoom));
 }
