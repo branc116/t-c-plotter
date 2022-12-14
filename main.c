@@ -7,12 +7,23 @@
 #include <errno.h>
 #include <math.h>
 
+#ifdef WIN
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
-#include <stdio.h>
-
 #pragma comment(lib, "Ws2_32.lib")
+
+#endif
+
+#ifdef LINUX
+#include "sys/socket.h"
+#include "netdb.h"
+#include "netinet/in.h"
+#include "arpa/inet.h"
+#include "pthread.h"
+
+#endif
 
 #define GLFW_INCLUDE_GLEXT
 #include <GLFW/glfw3.h>
@@ -225,7 +236,6 @@ typedef struct {
 // Global variables (fragile people with CS degree look away)
 static double ttime = 0.0;
 static bool pause = false;
-static GLuint user_texture = 0;
 static Renderer global_renderer = {0};
 
 void r_vertex(Renderer *r, V2f pos, V2f uv, V4f color)
@@ -409,12 +419,12 @@ void reload_render_conf(const char *render_conf_path)
             } else if (sv_eq(key, SV("objects_count"))) {
                 objects_count = strtol(value.data, NULL, 10);
                 if (objects_count > OBJECTS_CAP) {
-                    printf("%s:%d:%lld: WARNING: objects_count overflow\n",
+                    printf("%s:%d:%ld: WARNING: objects_count overflow\n",
                            render_conf_path, row, key.data - line_start);
                     objects_count = OBJECTS_CAP;
                 }
             } else {
-                printf("%s:%d:%lld: ERROR: unsupported key `"SV_Fmt"`\n",
+                printf("%s:%d:%ld: ERROR: unsupported key `"SV_Fmt"`\n",
                        render_conf_path, row, key.data - line_start,
                        SV_Arg(key));
                 continue;
@@ -684,6 +694,7 @@ reload_render_conf("render.conf");
     printf("OpenGL %d.%d\n", gl_ver_major, gl_ver_minor);
 
     glfwMakeContextCurrent(window);
+    
 
     load_gl_extensions();
 
@@ -697,6 +708,7 @@ reload_render_conf("render.conf");
         glDebugMessageCallback(MessageCallback, 0);
     }
 
+    glfwSwapInterval(1);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -800,9 +812,24 @@ reload_render_conf("render.conf");
     return 0;
 }
 
+void add_point_callback(char* buff, int len) {
+    UNUSED(len);
+
+    GLfloat d = (GLfloat)atof(buff); 
+    add_point((GLfloat)points_count, (GLfloat)d);
+}
+
+#if WIN
 int iResult;
 
 void start_listening_tcp(void(*callback)(char *, int)) {
+    WSADATA wsaData;
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed: %d\n", iResult);
+        return 1;
+    }
+
     struct addrinfo *result = NULL, hints;
     ZeroMemory(&hints, sizeof (hints));
     hints.ai_family = AF_INET;
@@ -877,29 +904,78 @@ void start_listening_tcp(void(*callback)(char *, int)) {
     } while (iResult > 0);
 }
 
-void add_point_callback(char* buff, int len) {
-    UNUSED(len);
-
-    GLfloat d = (GLfloat)atof(buff); 
-    add_point((GLfloat)points_count, (GLfloat)d);
-}
 int tcp_main(void * argz) {
     UNUSED(argz);
-
-    WSADATA wsaData;
-    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
-    if (iResult != 0) {
-        printf("WSAStartup failed: %d\n", iResult);
-        return 1;
-    }
     while(1) {
         start_listening_tcp(add_point_callback);
     }
     return 0;
 }
+
 HANDLE _beginthread(void(*func)(void *), int args, void *arg);
+
 int main(void)
 {
     (HANDLE)_beginthread(tcp_main, 0, (void*)(uintptr_t)NULL);
     return gl_main();
 }
+
+#endif
+
+#if LINUX
+void* tcp_main(void *) {
+  printf("Attempting to bind on localhost:42069\n");
+  char buffer[32] = {0};
+  struct in_addr a;
+  int e = inet_aton("127.0.0.1", &a);
+  if (e < 0)
+  {
+    fprintf(stderr, "ERROR: %d:%s\n", errno, strerror(errno));
+    assert(0);
+  }
+  struct sockaddr_in s_addr, c_addr;
+  memset(&s_addr, 0, sizeof(s_addr));
+  memset(&c_addr, 0, sizeof(c_addr));
+  s_addr.sin_family = AF_INET;
+  s_addr.sin_port = htons(42069);
+  s_addr.sin_addr = a;
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+  {
+    fprintf(stderr, "ERROR: %d:%s\n", errno, strerror(errno));
+    assert(0);
+  }
+  printf("SOCKET created with file descriptor: %d\n", fd);
+  int ei = bind(fd, (const struct sockaddr *)(&s_addr), sizeof(s_addr));
+  if (ei < 0)
+  {
+    fprintf(stderr, "ERROR: %d:%s\n", errno, strerror(errno));
+    assert(0);
+  }
+  printf("BIND successful\n", ei);
+  while (true)
+  {
+    socklen_t soc_len = 0;
+    ssize_t s = recvfrom(fd, buffer, sizeof(buffer), 0, (struct sockaddr *)(&c_addr), &soc_len);
+
+    if (s <= 0) continue;
+
+    buffer[s] = 0;
+    add_point_callback(buffer, s); 
+  }
+  printf("Killing listening thread\n");
+
+  return NULL;
+}
+
+int main(void) {
+  pthread_t thread;
+  pthread_attr_t attrs;
+
+  pthread_attr_init(&attrs);
+  if (pthread_create(&thread, &attrs, tcp_main, NULL)) {
+    fprintf(stderr, "ERROR while creating thread %d:`%s`\n", errno, strerror(errno));
+  }
+  gl_main();
+}
+#endif
