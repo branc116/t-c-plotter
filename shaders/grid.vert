@@ -8,7 +8,7 @@ layout(location = 2) in vec4 ver_color;
 
 uniform vec2 resolution;
 uniform vec2 offset;
-uniform float zoom;
+uniform vec2 zoom;
 
 precision mediump float;
 

@@ -54,11 +54,12 @@
 
 #define UNUSED(x) (void)((x))
 
-float zoom_level = 1.0f;
+V2d zoom_level = {1.0, 1.0};
+
 double xpos, ypos;
 V2d offset = {0.0, 0.0};
 
-#define MAX_POINTS 1024 * 10
+#define MAX_POINTS 1024 * 1024 * 4
 
 GLfloat points[MAX_POINTS][2] = {0};
 int points_count;
@@ -282,7 +283,7 @@ void r_sync_uniforms(Renderer *r,
                      GLfloat time,
                      GLfloat mouse_x, GLfloat mouse_y,
                      GLint tex_unit,
-                     GLfloat zoom_level_p,
+                     V2d zoom_level_p,
                      V2d offset_p)
 {
     static_assert(COUNT_UNIFORMS == 6, "Exhaustive uniform handling in ");
@@ -290,7 +291,7 @@ void r_sync_uniforms(Renderer *r,
     glUniform1f(r->uniforms[program][TIME_UNIFORM], time);
     glUniform2f(r->uniforms[program][MOUSE_UNIFORM], mouse_x, mouse_y);
     glUniform1i(r->uniforms[program][TEX_UNIFORM], tex_unit);
-    glUniform1f(r->uniforms[program][ZOOM], zoom_level_p);
+    glUniform2f(r->uniforms[program][ZOOM], (GLfloat)zoom_level_p.x, (GLfloat)zoom_level_p.y);
     glUniform2f(r->uniforms[program][OFFSET], (GLfloat)offset_p.x, (GLfloat)offset_p.y);
 }
 
@@ -520,21 +521,40 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         old_offset = v2d(offset.x, offset.y);
     }
 }
+int zoom_mode = 0; // 0 - equal, 1 - x, 2 - y
+
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
     UNUSED(window);
     UNUSED(xoffset);
 
-    zoom_level *= (1.0f + (float)yoffset*0.05f);
+    switch (zoom_mode) {
+      case 0:
+        zoom_level.x *= (1.0f + (float)yoffset*0.05f);
+        zoom_level.y *= (1.0f + (float)yoffset*0.05f);
+        break;
+      case 1:
+        zoom_level.x *= (1.0f + (float)yoffset*0.05f);
+        break;
+      case 2:
+        zoom_level.y *= (1.0f + (float)yoffset*0.05f);
+        break;
+    }
 }
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
     UNUSED(scancode);
     UNUSED(action);
     UNUSED(mods);
-
-    if (action == GLFW_PRESS) {
-        if (key == GLFW_KEY_F5) {
+    if (action == GLFW_RELEASE) {
+      zoom_mode = 0;
+    } else if (action == GLFW_PRESS) {
+        if (key == GLFW_KEY_X) {
+          zoom_mode = 1;
+        } else if (key == GLFW_KEY_Y) {
+          zoom_mode = 2;
+        } else if (key == GLFW_KEY_F5) {
             reload_render_conf("render.conf");
             r_reload(&global_renderer);
         } else if (key == GLFW_KEY_F6) {
@@ -558,7 +578,8 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         } else if (key == GLFW_KEY_Q) {
             exit(1);
         } else if (key == GLFW_KEY_R) {
-            zoom_level = 1.0f;
+            zoom_level.x = zoom_level.y = 1.0f;
+            offset.x = offset.y = 0;
         }
         if (pause) {
             if (key == GLFW_KEY_LEFT) {
@@ -665,8 +686,9 @@ V2d get_uv(V2d frag, V2d res) {
         v2d_sub(frag, v2d_mul(v2d(.5, .5), res)),
         v2d(res.y, res.y));
 }
+
 int gl_main(void) {
-reload_render_conf("render.conf");
+    reload_render_conf("render.conf");
 
     if (!glfwInit()) {
         fprintf(stderr, "ERROR: could not initialize GLFW\n");
@@ -727,15 +749,9 @@ reload_render_conf("render.conf");
     ttime = glfwGetTime();
     double prev_time = 0.0;
     double delta_time = 0.0f;
-    zoom_level = 1.0f;
+    zoom_level.x = zoom_level.y = 1.0f;
     glLineWidth(4.0f);
     int old_point_count = points_count;
-    add_point(0.0, 0.0);
-    add_point(0.0, 1.0),
-    add_point(1.0, 1.0),
-    add_point(1.0, 2.0),
-    add_point(2.0, 2.0),
-    add_point(0.0, 2.0);
     
     while (!glfwWindowShouldClose(window)) {
         int width, height;
@@ -802,7 +818,7 @@ reload_render_conf("render.conf");
             V2d uv = get_uv(v2d(mx, my), res);
             V2d dist_without_zoom = v2d_sum(
                     old_offset,
-                    v2d_mul(v2d(-zoom_level, zoom_level), v2d_sub(
+                    v2d_mul(v2d(-zoom_level.x, zoom_level.y), v2d_sub(
                         uv,
                         get_uv(press_location, res))));
             offset = dist_without_zoom;

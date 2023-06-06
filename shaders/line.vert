@@ -1,7 +1,3 @@
-// Single triangle strip quad generated entirely on the vertex shader.
-// Simply do glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) and the shader
-// generates 4 points from gl_VertexID. No Vertex Attributes are
-// required.
 #version 330
 
 precision mediump float;
@@ -10,7 +6,7 @@ layout(location = 3) in vec2 pos;
 
 uniform vec2 offset;
 uniform vec2 resolution;
-uniform float zoom;
+uniform vec2 zoom;
 out vec2 uv;
 
 void main(void)
